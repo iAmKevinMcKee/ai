@@ -1,12 +1,10 @@
 <?php
 
-use Illuminate\Support\Facades\Schedule;
+use Illuminate\Console\Scheduling\Schedule;
+use Laravel\Ai\Enums\Lab;
+use Laravel\Ai\Files\Document;
 use Laravel\Ai\Prompts\AgentPrompt;
 use Tests\Fixtures\Agents\AssistantAgent;
-
-it('registers the agent schedule macro', function () {
-    expect(Schedule::hasMacro('agent'))->toBeTrue();
-});
 
 it('runs an agent and writes its response to the output', function () {
     AssistantAgent::fake(['Daily digest summary']);
@@ -48,33 +46,51 @@ it('fails with a non-zero exit code when the agent throws', function () {
     ])->assertFailed();
 });
 
-it('schedules the agent as an agent:run command', function () {
-    $event = Schedule::agent(AssistantAgent::class, 'Summarize signups')->daily();
+it('runs a scheduled agent definition by index', function () {
+    AssistantAgent::fake(['Daily digest summary']);
 
-    expect($event->command)->toContain('agent:run')
-        ->and($event->command)->toContain('AssistantAgent')
-        ->and($event->command)->toContain('Summarize signups')
-        ->and($event->expression)->toBe('0 0 * * *')
-        ->and($event->description)->toBe('agent:AssistantAgent');
+    $agent = new AssistantAgent;
+    $attachment = Document::fromPath(__DIR__.'/../Fixtures/document.txt');
+
+    Schedule::macro('agents', fn () => [[
+        'agent' => $agent,
+        'prompt' => 'Summarize today\'s signups',
+        'attachments' => [$attachment],
+        'provider' => Lab::OpenAI,
+        'model' => 'gpt-6',
+        'timeout' => 120,
+    ]]);
+
+    $this->artisan('agent:run', ['agent' => '0'])
+        ->assertSuccessful()
+        ->expectsOutput('Daily digest summary');
+
+    AssistantAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->prompt === 'Summarize today\'s signups'
+        && $prompt->attachments->all() === [$attachment]
+        && $prompt->model === 'gpt-6'
+        && $prompt->timeout === 120
+    );
 });
 
-it('includes provider, model, and timeout in the scheduled command', function () {
-    $event = Schedule::agent(AssistantAgent::class, 'Summarize', provider: 'anthropic', model: 'claude-x', timeout: 120)->daily();
+it('resolves scheduled agent class names from the container', function () {
+    AssistantAgent::fake(['Digest']);
 
-    expect($event->command)->toContain('--provider=')
-        ->and($event->command)->toContain('anthropic')
-        ->and($event->command)->toContain('--model=')
-        ->and($event->command)->toContain('claude-x')
-        ->and($event->command)->toContain('--timeout=120');
+    Schedule::macro('agents', fn () => [[
+        'agent' => AssistantAgent::class,
+        'prompt' => 'Summarize',
+        'attachments' => [],
+        'provider' => [Lab::OpenAI, Lab::Anthropic],
+        'model' => null,
+        'timeout' => null,
+    ]]);
+
+    $this->artisan('agent:run', ['agent' => '0'])->assertSuccessful();
+
+    AssistantAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->prompt === 'Summarize');
 });
 
-it('supports the native scheduler output methods', function () {
-    $file = sys_get_temp_dir().'/agent-output.log';
+it('fails when no scheduled agent is registered at the given index', function () {
+    Schedule::macro('agents', fn () => []);
 
-    $event = Schedule::agent(AssistantAgent::class, 'Summarize')
-        ->daily()
-        ->sendOutputTo($file)
-        ->emailOutputTo('taylor@example.com');
-
-    expect($event->output)->toBe($file);
+    $this->artisan('agent:run', ['agent' => '3'])->assertFailed();
 });
